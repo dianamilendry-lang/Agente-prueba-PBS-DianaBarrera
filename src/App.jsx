@@ -1,4 +1,5 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
+import { loadProjectIndex, loadProject, saveProject, deleteProject, storageMode } from "./lib/storage";
 import * as XLSX from "xlsx";
 import {
   BarChart, Bar, LineChart, Line, XAxis, YAxis,
@@ -106,18 +107,6 @@ function extractCharts(text) {
   return { clean: charts.length ? text.replace(m[0], "").trim() : text, charts };
 }
 
-// ─── localStorage storage adapter (replaces window.storage) ─────────────────
-const storage = {
-  get: (key) => {
-    try { return { value: localStorage.getItem(key) ?? "" }; } catch { return { value: "" }; }
-  },
-  set: (key, value) => {
-    try { localStorage.setItem(key, value); } catch {}
-  },
-  delete: (key) => {
-    try { localStorage.removeItem(key); } catch {}
-  },
-};
 
 // ─── Data processing ──────────────────────────────────────────────────────────
 function cleanAndAnalyze(wb, fileName) {
@@ -411,83 +400,70 @@ export default function App() {
   const [busy, setBusy] = useState("");
   const scrollRef = useRef(null);
 
-  // Load project index from localStorage on mount
+  // Load project index on mount
   useEffect(() => {
-    try {
-      const raw = storage.get("proj_index").value;
-      setProjects(raw ? JSON.parse(raw) : []);
-    } catch {
-      setProjects([]);
-    }
-    setReady(true);
+    loadProjectIndex()
+      .then(setProjects)
+      .catch(() => setProjects([]))
+      .finally(() => setReady(true));
   }, []);
 
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [data?.messages, loading]);
 
-  const saveIndex = (list) => {
-    storage.set("proj_index", JSON.stringify(list));
-  };
-
-  const saveProject = (id, p) => {
-    storage.set("proj_" + id, JSON.stringify(p));
-  };
-
-  const createProject = () => {
+  const createProject = useCallback(async () => {
     const name = newName.trim() || "Proyecto " + (projects.length + 1);
     const id = "p" + Date.now();
+    const payload = { name, messages: [], sales: null, budget: null, inventory: null };
+    await saveProject(id, payload);
     const list = [...projects, { id, name }];
     setProjects(list);
     setNewName("");
-    saveIndex(list);
-    const payload = { name, messages: [], sales: null, budget: null, inventory: null };
     setActiveId(id);
     setData(payload);
     setTab("data");
-    saveProject(id, payload);
     setSidebar(false);
-  };
+  }, [newName, projects]);
 
-  const openProject = (id) => {
+  const openProject = useCallback(async (id) => {
     setActiveId(id);
     setSidebar(false);
     try {
-      const raw = storage.get("proj_" + id).value;
-      setData(raw ? JSON.parse(raw) : { name: projects.find((p) => p.id === id)?.name || "Proyecto", messages: [], sales: null, budget: null, inventory: null });
+      const p = await loadProject(id);
+      setData(p || { name: projects.find((x) => x.id === id)?.name || "Proyecto", messages: [], sales: null, budget: null, inventory: null });
       setTab("chat");
     } catch {
-      setData({ name: projects.find((p) => p.id === id)?.name || "Proyecto", messages: [], sales: null, budget: null, inventory: null });
+      setData({ name: projects.find((x) => x.id === id)?.name || "Proyecto", messages: [], sales: null, budget: null, inventory: null });
     }
-  };
+  }, [projects]);
 
-  const deleteProject = (id, e) => {
+  const removeProject = useCallback(async (id, e) => {
     e.stopPropagation();
+    await deleteProject(id);
     const list = projects.filter((p) => p.id !== id);
     setProjects(list);
-    saveIndex(list);
-    storage.delete("proj_" + id);
     if (activeId === id) { setActiveId(null); setData(null); }
-  };
+  }, [projects, activeId]);
 
-  const handleFile = (file, kind) => {
+  const handleFile = useCallback((file, kind) => {
     if (!file || !data) return;
     setBusy(kind);
     const reader = new FileReader();
-    reader.onload = (e) => {
+    reader.onload = async (e) => {
       try {
         const wb = XLSX.read(new Uint8Array(e.target.result), { type: "array" });
         const parsed = cleanAndAnalyze(wb, file.name);
         const upd = { ...data, [kind]: parsed };
         setData(upd);
-        saveProject(activeId, upd);
+        await saveProject(activeId, upd);
       } catch {
         alert("No pude leer el archivo. Verifica que sea Excel (.xlsx/.xls) válido, Jefa.");
       }
       setBusy("");
     };
     reader.readAsArrayBuffer(file);
-  };
+  }, [data, activeId]);
 
   const send = async (text) => {
     const content = (text ?? input).trim();
@@ -502,7 +478,7 @@ export default function App() {
     if (!apiKey) {
       const final = { ...data, messages: [...next, { role: "assistant", content: "⚠️ Configura la variable `VITE_ANTHROPIC_API_KEY` en tu archivo `.env` para activar el asistente, Jefa." }] };
       setData(final);
-      saveProject(activeId, final);
+      await saveProject(activeId, final);
       setLoading(false);
       return;
     }
@@ -529,11 +505,11 @@ export default function App() {
       const { clean, charts } = extractCharts(reply);
       const final = { ...data, messages: [...next, { role: "assistant", content: clean, charts }] };
       setData(final);
-      saveProject(activeId, final);
+      await saveProject(activeId, final);
     } catch {
       const final = { ...data, messages: [...next, { role: "assistant", content: "Hubo un problema de conexión con el motor de análisis. Intentemos nuevamente, Jefa." }] };
       setData(final);
-      saveProject(activeId, final);
+      await saveProject(activeId, final);
     } finally {
       setLoading(false);
     }
@@ -648,7 +624,7 @@ ${charts ? `<h2>Gráficas del análisis</h2>${charts}` : ""}
                 <span className="flex items-center gap-2 truncate">
                   <Folder className="h-4 w-4 shrink-0 text-sky-400" />{p.name}
                 </span>
-                <button onClick={(e) => deleteProject(p.id, e)} className="opacity-0 transition-opacity group-hover:opacity-100">
+                <button onClick={(e) => removeProject(p.id, e)} className="opacity-0 transition-opacity group-hover:opacity-100">
                   <Trash2 className="h-3.5 w-3.5 text-slate-400 hover:text-red-400" />
                 </button>
               </div>
@@ -678,6 +654,9 @@ ${charts ? `<h2>Gráficas del análisis</h2>${charts}` : ""}
           <p className="text-xs leading-relaxed text-slate-400">
             No inventa cifras · Valida y limpia datos · Separa Datos / Cálculos / Conclusiones · No decide por usted.
           </p>
+          <div className={`mt-2 inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-semibold ${storageMode === "supabase" ? "bg-emerald-500/20 text-emerald-300" : "bg-slate-600 text-slate-400"}`}>
+            {storageMode === "supabase" ? "● Supabase" : "○ Local"}
+          </div>
         </div>
       </aside>
 
