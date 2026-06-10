@@ -474,24 +474,31 @@ export default function App() {
     setLoading(true);
     setTab("chat");
 
-    const apiKey = import.meta.env.VITE_ANTHROPIC_API_KEY;
-    if (!apiKey) {
-      const final = { ...data, messages: [...next, { role: "assistant", content: "⚠️ Configura la variable `VITE_ANTHROPIC_API_KEY` en tu archivo `.env` para activar el asistente, Jefa." }] };
+    // En producción (Vercel) usa el proxy /api/chat.
+    // En dev local usa Anthropic directo si VITE_ANTHROPIC_API_KEY está en .env.
+    const isDev = import.meta.env.DEV;
+    const devKey = import.meta.env.VITE_ANTHROPIC_API_KEY;
+
+    if (isDev && !devKey) {
+      const final = { ...data, messages: [...next, { role: "assistant", content: "⚠️ Configura `VITE_ANTHROPIC_API_KEY` en tu `.env` para usar el asistente en local, Jefa." }] };
       setData(final);
       await saveProject(activeId, final);
       setLoading(false);
       return;
     }
 
+    const endpoint = isDev ? "https://api.anthropic.com/v1/messages" : "/api/chat";
+    const headers = { "Content-Type": "application/json" };
+    if (isDev) {
+      headers["x-api-key"] = devKey;
+      headers["anthropic-version"] = "2023-06-01";
+      headers["anthropic-dangerous-direct-browser-access"] = "true";
+    }
+
     try {
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
+      const res = await fetch(endpoint, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": apiKey,
-          "anthropic-version": "2023-06-01",
-          "anthropic-dangerous-direct-browser-access": "true",
-        },
+        headers,
         body: JSON.stringify({
           model: "claude-sonnet-4-20250514",
           max_tokens: 4096,
